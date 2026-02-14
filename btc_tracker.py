@@ -6,22 +6,64 @@ import hmac
 import hashlib
 import urllib.request
 import argparse
+import base64
+import getpass
+
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.backends import default_backend
+from cryptography.fernet import Fernet
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.enc")
+EUR_RATE = 0.92
 
 
-CONFIG_FILE = "config.json"
+# =====================================================
+#                ENCRYPTION HELPERS
+# =====================================================
 
-# FIXED USD → EUR rate when using --assume-price
-EUR_RATE = 0.92   # <-- change this whenever you want
-
-
-# -------------------------------
-#   Fetch BTC price (USD + EUR)
-# -------------------------------
-def fetch_btc_price():
-    url = (
-        "https://api.coingecko.com/api/v3/simple/price"
-        "?ids=bitcoin&vs_currencies=usd,eur"
+def derive_key(password: str, salt: bytes) -> bytes:
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=390000,
+        backend=default_backend()
     )
+    return base64.urlsafe_b64encode(kdf.derive(password.encode()))
+
+
+def encrypt_config(data: dict, password: str):
+    salt = os.urandom(16)
+    key = derive_key(password, salt)
+    f = Fernet(key)
+    encrypted = f.encrypt(json.dumps(data).encode())
+
+    with open(CONFIG_FILE, "wb") as f_out:
+        f_out.write(salt + encrypted)
+
+
+def decrypt_config(password: str) -> dict:
+    with open(CONFIG_FILE, "rb") as f:
+        raw = f.read()
+
+    salt = raw[:16]
+    encrypted = raw[16:]
+
+    key = derive_key(password, salt)
+    fernet = Fernet(key)
+    decrypted = fernet.decrypt(encrypted)
+
+    return json.loads(decrypted.decode())
+
+
+# =====================================================
+#                PRICE FETCHING
+# =====================================================
+
+def fetch_btc_price():
+    url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd,eur"
     try:
         with urllib.request.urlopen(url, timeout=10) as r:
             data = json.loads(r.read().decode())
@@ -31,9 +73,10 @@ def fetch_btc_price():
         return None, None
 
 
-# -------------------------------
-#  Fetch BTC address balance
-# -------------------------------
+# =====================================================
+#                BTC BALANCES
+# =====================================================
+
 def fetch_btc_address_balance(address):
     url = f"https://blockchain.info/q/addressbalance/{address}?confirmations=6"
     try:
@@ -45,9 +88,6 @@ def fetch_btc_address_balance(address):
         return 0.0
 
 
-# -------------------------------
-#   Binance Spot BTC balance
-# -------------------------------
 def fetch_binance_spot_balance(api_key, api_secret):
     base = "https://api.binance.com"
     endpoint = "/api/v3/account"
@@ -77,22 +117,29 @@ def fetch_binance_spot_balance(api_key, api_secret):
         return 0.0
 
 
-# -------------------------------
-#      CONFIG SETUP
-# -------------------------------
+# =====================================================
+#                CONFIG SETUP
+# =====================================================
+
 def setup_config():
     print("=== First-Time Setup ===")
 
     addresses = []
-    print("\nEnter your BTC addresses (empty input to finish):")
     while True:
-        addr = input("BTC Address: ").strip()
+        addr = input("BTC Address (empty to finish): ").strip()
         if not addr:
             break
         addresses.append(addr)
 
-    api_key = input("\nBinance API Key: ").strip()
+    api_key = input("Binance API Key: ").strip()
     api_secret = input("Binance API Secret: ").strip()
+
+    password = getpass.getpass("Create encryption password: ")
+    confirm = getpass.getpass("Confirm password: ")
+
+    if password != confirm:
+        print("Passwords do not match.")
+        exit(1)
 
     config = {
         "btc_addresses": addresses,
@@ -100,75 +147,75 @@ def setup_config():
         "binance_api_secret": api_secret
     }
 
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(config, f, indent=2)
-
-    print("\n✔ Config saved!\n")
+    encrypt_config(config, password)
+    print("✔ Config encrypted and saved.")
     return config
 
 
-# -------------------------------
-#            MAIN
-# -------------------------------
+def load_config():
+    if not os.path.exists(CONFIG_FILE):
+        return setup_config()
+
+    password = getpass.getpass("Enter config password: ")
+    try:
+        return decrypt_config(password)
+    except Exception:
+        print("Invalid password or corrupted config.")
+        exit(1)
+
+
+# =====================================================
+#                     MAIN
+# =====================================================
+
 def main():
     parser = argparse.ArgumentParser(description="BTC Tracker CLI")
-    parser.add_argument("--assume-price", type=float,
-                        help="Assume a manual BTC price in USD")
+    parser.add_argument("--assume-price", type=float, help="Mock BTC price in USD")
+    parser.add_argument("--show-config", action="store_true",
+                        help="Decrypt and display config")
     args = parser.parse_args()
 
-    print("=== BTC Tracker ===\n")
+    config = load_config()
 
-    # Load config
-    if not os.path.exists(CONFIG_FILE):
-        config = setup_config()
-    else:
-        with open(CONFIG_FILE, "r") as f:
-            config = json.load(f)
+    if args.show_config:
+        print(json.dumps(config, indent=2))
+        return
 
-    addresses = config["btc_addresses"]
-    api_key = config["binance_api_key"]
-    api_secret = config["binance_api_secret"]
+    print("\n=== BTC Tracker ===\n")
 
-    # -----------------------------------------------------
-    # PRICE HANDLING
-    # -----------------------------------------------------
+    # PRICE
     if args.assume_price:
         price_usd = args.assume_price
         price_eur = price_usd * EUR_RATE
-
         print(f"Using mocked BTC price:")
         print(f"USD: {price_usd:.2f}")
-        print(f"EUR: {price_eur:.2f}  (fixed EUR rate {EUR_RATE})\n")
-
+        print(f"EUR: {price_eur:.2f}\n")
     else:
         price_usd, price_eur = fetch_btc_price()
         if not price_usd:
-            print("Failed to fetch BTC price. Exiting.")
+            print("Failed to fetch BTC price.")
             return
 
-        print(f"BTC Price:  USD {price_usd:,.2f} | EUR {price_eur:,.2f}\n")
+        print(f"BTC Price: USD {price_usd:,.2f} | EUR {price_eur:,.2f}\n")
 
-    # -----------------------------------------------------
-    # BTC ADDRESSES
-    # -----------------------------------------------------
     total_btc_addresses = 0
+
     print("=== BTC Address Balances ===")
-    for addr in addresses:
+    for addr in config["btc_addresses"]:
         bal = fetch_btc_address_balance(addr)
         total_btc_addresses += bal
-        print(f"{addr}: {bal:.8f} BTC  |  USD {bal * price_usd:.2f}  |  EUR {bal * price_eur:.2f}")
+        print(f"{addr}: {bal:.8f} BTC | USD {bal * price_usd:.2f} | EUR {bal * price_eur:.2f}")
 
-    # -----------------------------------------------------
-    # BINANCE BALANCE
-    # -----------------------------------------------------
     print("\n=== Binance BTC Spot Balance ===")
-    spot_btc = fetch_binance_spot_balance(api_key, api_secret)
-    print(f"Binance: {spot_btc:.8f} BTC  |  USD {spot_btc * price_usd:.2f}  |  EUR {spot_btc * price_eur:.2f}\n")
+    spot_btc = fetch_binance_spot_balance(
+        config["binance_api_key"],
+        config["binance_api_secret"]
+    )
 
-    # -----------------------------------------------------
-    # TOTAL
-    # -----------------------------------------------------
+    print(f"Binance: {spot_btc:.8f} BTC | USD {spot_btc * price_usd:.2f} | EUR {spot_btc * price_eur:.2f}\n")
+
     total_btc = total_btc_addresses + spot_btc
+
     print("=== TOTAL BTC VALUE ===")
     print(f"TOTAL BTC: {total_btc:.8f}")
     print(f"TOTAL USD: {total_btc * price_usd:,.2f}")

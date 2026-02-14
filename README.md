@@ -7,8 +7,7 @@ BTC Tracker CLI is a lightweight Python command-line tool designed to:
   - A Binance Spot account  
 - Fetch current BTC prices in USD and EUR  
 - Optionally use a mocked BTC price via `--assume-price`  
-- Store configuration locally in `config.json`  
-- Operate with no external dependencies  
+- Store configuration locally encrypted in `config.enc`
 
 ---
 
@@ -30,6 +29,11 @@ The EUR value is automatically calculated using a fixed conversion rate defined 
 
 ```python
 EUR_RATE = 0.92
+```
+
+Configuration settings can also be exported using:
+```
+--show-config
 ```
 
 ---
@@ -162,9 +166,7 @@ Deleting this file triggers the setup process on next execution.
 
 Potential enhancements include:
 
-- JSON output mode  
-- Compact summary mode  
-- Hiding BTC addresses in output  
-- Password-encrypted configuration  
+- Compact summary mode
+- Hiding BTC addresses in output
 
 BTC Tracker CLI provides a simple and effective way to monitor BTC holdings and current prices from multiple sources.
